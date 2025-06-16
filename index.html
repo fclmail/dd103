@@ -1,0 +1,302 @@
+<!DOCTYPE html>  
+<html lang="en">  
+<head>  
+  <meta charset="UTF-8" />  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>  
+  <title>DODO Flash Loan Arbitrage</title>  
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>  
+  <style>  
+    body {  
+      background-color: #002d00;  
+      color: #39ff14;  
+      font-family: monospace;  
+      padding: 20px;  
+    }  
+    button {  
+      background: #39ff14;  
+      color: #002d00;  
+      padding: 10px;  
+      margin: 5px;  
+      font-weight: bold;  
+      cursor: pointer;  
+    }  
+    input, select {  
+      padding: 8px;  
+      margin: 5px;  
+    }  
+    .log {  
+      white-space: pre-wrap;  
+      border: 1px solid #39ff14;  
+      padding: 10px;  
+      margin-top: 20px;  
+      max-height: 300px;  
+      overflow-y: auto;  
+    }  
+    .log div {  
+      margin-bottom: 8px;  
+    }  
+    .log .green {  
+      color: #00ff00;  
+      font-weight: bold;  
+    }  
+    .log .error {  
+      color: #ff0000;  
+      font-weight: bold;  
+    }  
+    .status {  
+      margin: 10px 0;  
+      padding: 8px;  
+      border: 1px solid #39ff14;  
+    }  
+    .status.online {  
+      background-color: #004d00;  
+    }  
+    .status.offline {  
+      background-color: #4d0000;  
+    }  
+  </style>  
+</head>  
+<body>  
+  <h1>DODO Flash Loan Arbitrage</h1>  
+
+  <div id="networkStatus" class="status offline">  
+    Network: Disconnected  
+  </div>  
+
+  <div>  
+    <button id="connect">Connect Wallet</button>  
+    <span id="wallet"></span>  
+    <span id="usdcBalance"></span>  
+  </div>  
+
+  <div>  
+    <label>Select Token:</label>  
+    <select id="token1"></select>  
+  </div>  
+
+  <div>  
+    <label>Trade Amount (USDC):</label>  
+    <input id="tradeAmount" type="number" value="1000" step="0.00000000001">  
+    <label>Min Profit (USDC):</label>  
+    <input id="minProfit" type="number" value="0.0001" step="0.0000001">  
+    <label>Slippage (bps):</label>  
+    <input id="slippage" type="number" value="5">  
+    <label>Scan Interval (sec):</label>  
+    <input id="scanInterval" type="number" value="10" min="1" step="1">  
+  </div>  
+
+  <div>  
+    <label>Gas Setting:</label>  
+    <select id="gasOption">  
+      <option value="dynamic">Dynamic</option>  
+      <option value="fast">Fast</option>  
+      <option value="turbo">Turbo</option>  
+    </select>  
+    <label>Manual Gas (Gwei):</label>  
+    <input id="manualGas" type="number" step="1" placeholder="e.g. 50">  
+    <label>Bribe (MATIC):</label>  
+    <input id="bribeAmount" type="number" step="0.0001" placeholder="e.g. 0.05">  
+  </div>  
+
+  <div>  
+    <button id="approve">Approve USDC</button>  
+    <button id="start">Start</button>  
+    <button id="stop">Stop</button>  
+    <button id="autoscan">AutoScan All</button>  
+  </div>  
+
+  <div>  
+    <label>Autotrade:</label><input type="checkbox" id="autotrade">  
+    <label>Only When Profitable:</label><input type="checkbox" id="onlyProfitable" checked>  
+    <label>Use Flash Loan:</label><input type="checkbox" id="useFlashLoan">  
+  </div>  
+
+<div class="log" id="log"></div>  
+
+  <script>  
+    const contractAddress = "0x2498Bc50732a655F0DbEa3319B1Cd7DDec884b6a";  
+    const abi = [];  
+
+    const tokens = {  
+      AAVE: "0x8dff5e27ea6b7ac08ebfdf9eb090f32ee9a30fcf",  
+      WBTC: "0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6",  
+      UNI:  "0xb33eaad8d922b1083446dc23f610c2567fb5180f",  
+      USDC: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  
+      DAI:  "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063",  
+      USDT: "0xc2132d05d31c914a87c6611c10748aeb04b58e8f",  
+      SHIB: "0x6f8a06447ff6fcf75d803135a7de15ce88c1d4ec",  
+      CRV:  "0x172370d5cd63279efa6d502dab29171933a610af",  
+      LINK: "0x53e0bca35ec356bd5dddfebbd1fc0fd03fabad39",  
+      WETH: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"  
+    };  
+
+    const rpcUrls = [  
+      "https://rpc.ankr.com/polygon",  
+      "https://polygon-rpc.com",  
+      "https://polygon-mainnet.g.alchemy.com/v2/demo"  
+    ];  
+    
+    let currentRpcIndex = 0;  
+    let rpcProvider = new ethers.providers.JsonRpcProvider(rpcUrls[currentRpcIndex]);  
+    let signer, contract, scanning = false, autoscanActive = false, intervalId;  
+
+    // Network status monitoring  
+    async function checkNetworkStatus() {  
+      try {  
+        await rpcProvider.getBlockNumber();  
+        document.getElementById('networkStatus').className = 'status online';  
+        document.getElementById('networkStatus').textContent = 'Network: Connected';  
+        return true;  
+      } catch (e) {  
+        document.getElementById('networkStatus').className = 'status offline';  
+        document.getElementById('networkStatus').textContent = 'Network: Disconnected - Trying to reconnect...';  
+        return false;  
+      }  
+    }  
+
+    // Switch to next RPC if current fails  
+    async function switchRpc() {  
+      currentRpcIndex = (currentRpcIndex + 1) % rpcUrls.length;  
+      rpcProvider = new ethers.providers.JsonRpcProvider(rpcUrls[currentRpcIndex]);  
+      log(`Switched to RPC: ${rpcUrls[currentRpcIndex]}`);  
+      await checkNetworkStatus();  
+    }  
+
+    // Initialize network status check  
+    setInterval(checkNetworkStatus, 10000);  
+    checkNetworkStatus();  
+
+    const tokenSelect = document.getElementById('token1');  
+    Object.entries(tokens).forEach(([name, addr]) => {  
+      const option = document.createElement('option');  
+      option.value = addr;  
+      option.text = name;  
+      tokenSelect.appendChild(option);  
+    });  
+
+    const log = (msg, isProfit = false, isError = false) => {  
+      const timestamp = new Date().toLocaleTimeString();  
+      const line = document.createElement('div');  
+      line.textContent = `[${timestamp}] ${msg}`;  
+      if (isProfit) line.classList.add('green');  
+      if (isError) line.classList.add('error');  
+      document.getElementById('log').prepend(line);  
+    };  
+
+    async function updateUSDCBalance() {  
+      try {  
+        const usdc = new ethers.Contract(tokens.USDC, ["function balanceOf(address) view returns (uint256)"], rpcProvider);  
+        const balance = await usdc.balanceOf(await signer.getAddress());  
+        document.getElementById('usdcBalance').innerText = ` | USDC: ${ethers.utils.formatUnits(balance, 6)}`;  
+      } catch (e) {  
+        log(`❌ Error updating balance: ${e.message}`, false, true);  
+      }  
+    }  
+
+    document.getElementById('connect').onclick = async () => {  
+      try {  
+        if (!window.ethereum) {  
+          log("❌ MetaMask not detected. Please install MetaMask first.", false, true);  
+          return;  
+        }  
+        
+        const web3Provider = new ethers.providers.Web3Provider(window.ethereum);  
+        await web3Provider.send("eth_requestAccounts", []);  
+        signer = web3Provider.getSigner();  
+        contract = new ethers.Contract(contractAddress, abi, signer);  
+        document.getElementById('wallet').innerText = await signer.getAddress();  
+        await updateUSDCBalance();  
+        log("✅ Wallet connected successfully");  
+      } catch (e) {  
+        log(`❌ Connection error: ${e.message}`, false, true);  
+      }  
+    };  
+
+    document.getElementById('approve').onclick = async () => {  
+      try {  
+        const usdc = new ethers.Contract(tokens.USDC, ["function approve(address,uint256) public returns(bool)"], signer);  
+        const tx = await usdc.approve(contractAddress, ethers.constants.MaxUint256);  
+        await tx.wait();  
+        log("✅ USDC approved successfully");  
+      } catch (e) {  
+        log(`❌ Approval error: ${e.reason || e.message}`, false, true);  
+      }  
+    };  
+
+    async function scanSingle(token1Addr) {  
+      if (!token1Addr || token1Addr === tokens.USDC) return;  
+
+      try {  
+        // Check network connection first  
+        if (!await checkNetworkStatus()) {  
+          await switchRpc();  
+        }  
+
+        const router1 = new ethers.Contract("0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff", ["function getAmountsOut(uint amountIn, address[] memory path) public view returns (uint[] memory)"], rpcProvider);  
+        const router2 = new ethers.Contract("0x1b02da8cb0d097eb8d57a175b88c7d8b47997506", ["function getAmountsOut(uint amountIn, address[] memory path) public view returns (uint[] memory)"], rpcProvider);  
+        const tradeAmount = ethers.utils.parseUnits(document.getElementById('tradeAmount').value, 6);  
+        const minProfit = parseFloat(document.getElementById('minProfit').value);  
+
+        const out1 = await router1.getAmountsOut(tradeAmount, [tokens.USDC, token1Addr]);  
+        const out2 = await router2.getAmountsOut(out1[1], [token1Addr, tokens.USDC]);  
+
+        const finalUSDC = out2[1];  
+        const profit = parseFloat(ethers.utils.formatUnits(finalUSDC.sub(tradeAmount), 6));  
+        const profitPct = (profit / parseFloat(ethers.utils.formatUnits(tradeAmount, 6))) * 100;  
+        const symbol = Object.keys(tokens).find(key => tokens[key] === token1Addr);  
+
+        log(`Profit: $${profit.toFixed(6)} (${profitPct.toFixed(2)}%) on ${symbol}`, profit > 0);  
+
+        if (document.getElementById('autotrade').checked && profit > minProfit) {  
+          const useFlash = document.getElementById('useFlashLoan').checked;  
+          log(useFlash ? "Executing flash loan arbitrage..." : "Executing arbitrage...");  
+
+          const overrides = {};  
+          const bribe = parseFloat(document.getElementById('bribeAmount').value || 0);  
+          const manualGas = parseFloat(document.getElementById('manualGas').value || 0);  
+          if (bribe > 0) overrides.value = ethers.utils.parseEther(bribe.toString());  
+          if (manualGas > 0) overrides.gasPrice = ethers.utils.parseUnits(manualGas.toString(), 'gwei');  
+
+          const tx = await contract.initiateArbitrage(tokens.USDC, token1Addr, tradeAmount, "0x", overrides);  
+          await tx.wait();  
+          log("✅ Arbitrage completed successfully.");  
+          await updateUSDCBalance();  
+        }  
+
+      } catch (e) {  
+        log(`❌ Scan error: ${e.reason || e.message}`, false, true);  
+        await switchRpc();  
+      }  
+    }  
+
+    document.getElementById('start').onclick = () => {  
+      scanning = true;  
+      const token1 = document.getElementById('token1').value;  
+      const intervalSec = parseInt(document.getElementById('scanInterval').value) || 10;  
+      log(`Started scanning ${token1} every ${intervalSec} sec`);  
+      clearInterval(intervalId);  
+      intervalId = setInterval(() => scanSingle(token1), intervalSec * 1000);  
+    };  
+
+    document.getElementById('stop').onclick = () => {  
+      clearInterval(intervalId);  
+      scanning = false;  
+      autoscanActive = false;  
+      log("⏹️ Stopped scanning");  
+    };  
+
+    document.getElementById('autoscan').onclick = () => {  
+      autosscanActive = true;  
+      const intervalSec = parseInt(document.getElementById('scanInterval').value) || 10;  
+      log("🔍 AutoScan All started");  
+      clearInterval(intervalId);  
+      intervalId = setInterval(async () => {  
+        for (const tokenAddr of Object.values(tokens)) {  
+          if (!autoscanActive) return;  
+          await scanSingle(tokenAddr);  
+        }  
+      }, intervalSec * 1000);  
+    };  
+  </script>  
+</body>  
+</html>
